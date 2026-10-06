@@ -19,6 +19,52 @@ repeater locations.
 
 Scale: about **30 beacons** and **10 repeaters**.
 
+## Status
+
+Last updated: 2026-10-06. Statuses: Not started, In progress, Code complete (builds, not verified on hardware), Done
+(verified).
+
+| # | Milestone | Status | Notes |
+|---|---|---|---|
+| 1 | Beacon firmware (`examples/beacon`) | In progress | Flashed and transmitting; advert received by a USB companion. Android app, sleep current and power not yet checked. |
+| 2 | Beacon repeater: filter and RSSI/SNR capture | Not started | |
+| 3 | Batched report packet, base ingest | Not started | |
+| 4 | Base: allowlist, high-water mark, dedupe, reset | Not started | |
+| 5 | Airtime measurement, batching and hop tuning | Not started | |
+| 6 | Location estimation, walk tests | Not started | |
+
+### Milestone 1 detail
+
+Implemented:
+- Signed zero-hop `ADV_TYPE_SENSOR` advert with battery (`feat1`) and beacon marker (`feat2`, 0xBE01), an optional
+  name, and 8 zeroed reserved bytes. Encoding is in `src/helpers/BeaconAdvert.h`, shared with the future repeater.
+- Counter-as-timestamp clock, with reserve-ahead persistence (one flash write per 256 sends).
+- Own timer, 300 s interval with +/-10% jitter, randomised first send after boot.
+- Radio warm-sleeps after each send; MCU idles in `delay()`. Beacon never enters RX.
+- Serial CLI: `pubkey`, `ver`, `advert`, `reboot`, `get interval|name|counter|batt|radio|tx`, `set interval|name`,
+  `set radio <freq>,<bw>,<sf>,<cr>`, `set tx <dbm>`.
+- Radio settings are saved in the beacon's prefs and applied immediately. The beacon build defaults are 905.775 MHz,
+  BW 62.5 kHz, SF 8, CR 4/6 (`LORA_CR=6`) and 22 dBm, set in the `Xiao_nrf52_beacon` env. Repeaters and the base must
+  use the same values, so decision 14 now also implies CR 4/6 and 905.775 MHz.
+
+Deviations from the plan text:
+- Sends the raw packet straight to the radio instead of calling `sendZeroHop()`, because the dispatcher loop would put
+  the radio into RX. Wire format is identical.
+- When a name is present the reserved bytes follow a NUL after the name, so name parsers ignore them.
+- No separate timer-only `board.sleep()` path was written; sleep relies on FreeRTOS tickless idle (unmeasured).
+
+Verified on hardware (2026-10-06):
+- The beacon transmits a signed advert on the configured radio settings, and a USB companion shows `beacon-001`.
+- Bug found and fixed: after warm sleep, `startTransmit()` does not wake the radio (unlike `startReceive()`), so the first
+  send failed. `sendAdvert()` now calls `wakeUp()` first. Failures report a reason on serial.
+
+Still to do for milestone 1:
+- Confirm the advert, with its feature fields, name and reserved bytes, displays correctly in the Android app (open
+  question 3). The companion saw it, but the app has not been checked.
+- Confirm the repeater-side view of the advert is intact over several sends (counter increments, signature valid).
+- Measure sleep and average current, and compare with the sizing estimates.
+- Decide whether to turn off the TX LED to save power.
+
 ## Decisions
 
 | # | Decision | Rationale |

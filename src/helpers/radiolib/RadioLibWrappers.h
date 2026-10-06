@@ -33,6 +33,8 @@ public:
 
   void begin() override;
   virtual void powerOff() { _radio->sleep(); }
+  void wakeUp() { _radio->standby(); }   // leave sleep (e.g. before reconfiguring)
+  void sleepKeepConfig() { _radio->sleep(); }   // warm sleep: config retained, next startTransmit()/startReceive() wakes the radio
   int recvRaw(uint8_t* bytes, int sz) override;
   uint32_t getEstAirtimeFor(int len_bytes) override;
   bool startSendRaw(const uint8_t* bytes, int len) override;
