@@ -29,29 +29,29 @@ static void handleCommand(char* cmd) {
     Serial.print("  -> "); mesh::Utils::printHex(Serial, beacon.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
   } else if (strcmp(cmd, "advert") == 0) {
     if (beacon.sendAdvert()) Serial.println("  -> sent");
-    else Serial.printf("  -> ERROR: send failed (%s)\n", beacon.getLastError());
+    else Serial.printf("  -> ERROR: send failed (%s)\r\n", beacon.getLastError());
   } else if (strcmp(cmd, "reboot") == 0) {
     Serial.println("  -> rebooting");
     Serial.flush();
     board.reboot();
   } else if (strcmp(cmd, "get interval") == 0) {
-    Serial.printf("  -> %lu secs\n", beacon.getIntervalSecs());
+    Serial.printf("  -> %lu secs\r\n", beacon.getIntervalSecs());
   } else if (strcmp(cmd, "get name") == 0) {
-    Serial.printf("  -> %s\n", beacon.getName());
+    Serial.printf("  -> %s\r\n", beacon.getName());
   } else if (strcmp(cmd, "get radio") == 0) {
-    Serial.printf("  -> %.3f,%.1f,%d,%d\n", beacon.getFreq(), beacon.getBandwidth(), beacon.getSpreadFactor(), beacon.getCodingRate());
+    Serial.printf("  -> %.3f,%.1f,%d,%d\r\n", beacon.getFreq(), beacon.getBandwidth(), beacon.getSpreadFactor(), beacon.getCodingRate());
   } else if (strcmp(cmd, "get tx") == 0) {
-    Serial.printf("  -> %d dBm\n", beacon.getTxPower());
+    Serial.printf("  -> %d dBm\r\n", beacon.getTxPower());
   } else if (strcmp(cmd, "get counter") == 0) {
-    Serial.printf("  -> %lu\n", beacon.getCounter());
+    Serial.printf("  -> %lu\r\n", beacon.getCounter());
   } else if (strcmp(cmd, "get batt") == 0) {
-    Serial.printf("  -> %u mV\n", (unsigned)board.getBattMilliVolts());
+    Serial.printf("  -> %u mV\r\n", (unsigned)board.getBattMilliVolts());
   } else if (memcmp(cmd, "set interval ", 13) == 0) {
     if (beacon.setIntervalSecs(strtoul(&cmd[13], NULL, 10))) {
       next_tx_at = millis() + beacon.nextIntervalMillis();
       Serial.println("  -> OK");
     } else {
-      Serial.printf("  -> ERROR: interval must be %d-%d secs\n", BEACON_MIN_INTERVAL_SECS, BEACON_MAX_INTERVAL_SECS);
+      Serial.printf("  -> ERROR: interval must be %d-%d secs\r\n", BEACON_MIN_INTERVAL_SECS, BEACON_MAX_INTERVAL_SECS);
     }
   } else if (memcmp(cmd, "set radio ", 10) == 0) {
     const char* parts[4];
@@ -122,7 +122,7 @@ void loop() {
 
   if ((int32_t)(millis() - next_tx_at) >= 0) {
     bool ok = beacon.sendAdvert();
-    if (usb) Serial.printf("TX counter=%lu %s%s%s\n", beacon.getCounter(), ok ? "ok" : "FAILED (", ok ? "" : beacon.getLastError(), ok ? "" : ")");
+    if (usb) Serial.printf("TX counter=%lu %s%s%s\r\n", beacon.getCounter(), ok ? "ok" : "FAILED (", ok ? "" : beacon.getLastError(), ok ? "" : ")");
     next_tx_at = millis() + beacon.nextIntervalMillis();
   }
 
