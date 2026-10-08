@@ -21,14 +21,14 @@ Scale: about **30 beacons** and **10 repeaters**.
 
 ## Status
 
-Last updated: 2026-10-06. Statuses: Not started, In progress, Code complete (builds, not verified on hardware), Done
+Last updated: 2026-10-08. Statuses: Not started, In progress, Code complete (builds, not verified on hardware), Done
 (verified).
 
 | # | Milestone | Status | Notes |
 |---|---|---|---|
 | 1 | Beacon firmware (`examples/beacon`) | In progress | Flashed and transmitting; advert received by a USB companion. Android app, sleep current and power not yet checked. |
-| 2 | Beacon repeater: filter and RSSI/SNR capture | Not started | |
-| 3 | Batched report packet, base ingest | Not started | |
+| 2 | Beacon repeater: filter and RSSI/SNR capture | Code complete | Build env `Xiao_nrf52_beacon_repeater`. Not run on hardware. |
+| 3 | Batched report packet, base ingest | In progress | Repeater side is code complete (format in `src/helpers/BeaconReport.h`, host-tested). Base ingest not started. |
 | 4 | Base: allowlist, high-water mark, dedupe, reset | Not started | |
 | 5 | Airtime measurement, batching and hop tuning | Not started | |
 | 6 | Location estimation, walk tests | Not started | |
@@ -64,6 +64,36 @@ Still to do for milestone 1:
 - Confirm the repeater-side view of the advert is intact over several sends (counter increments, signature valid).
 - Measure sleep and average current, and compare with the sizing estimates.
 - Decide whether to turn off the TX LED to save power.
+
+### Milestone 2 and repeater side of milestone 3 detail
+
+Implemented (in `examples/simple_repeater`, compiled only with `-D WITH_BEACON_REPORTER=1`, so the stock repeater is
+unchanged; build with `pio run -e Xiao_nrf52_beacon_repeater`, which sets the shared radio settings from decision 14).
+For testing on an ESP32-S3 use `Xiao_S3_beacon_repeater` (SX1262 module on the header pins) or
+`Xiao_S3_WIO_beacon_repeater` (Wio-SX1262 kit), which use the same flags and are the same code:
+- `MyMesh::onAdvertRecv` recognises a beacon: valid signed advert, **direct** route with an empty path (a flood advert
+  carrying the marker is ignored, since real beacons never flood), `ADV_TYPE_SENSOR` and the `feat2` marker. The beacon
+  packet is never forwarded (`Mesh` does not route direct adverts).
+- RSSI is captured in `logRxRaw()`, right after the radio read, so it belongs to the packet being processed. SNR comes
+  from the packet. No allowlist, replay check or rate limit at the repeater.
+- Report wire format in `src/helpers/BeaconReport.h`, shared with the future base: `GRP_DATA`, `data_type` 0xFFBE (dev
+  range), header 10 bytes (version, repeater key prefix 8, count) plus 16-byte entries (beacon key prefix 8, counter 4,
+  RSSI 1, SNR x4 1, battery mV 2). A full packet carries 9 entries (154 of 165 data bytes).
+- Batching: a packet is flushed when full or `beacon.window` seconds after its first entry (default 60). Sent with
+  `sendFloodScoped()` on the repeater's default scope. If no packet can be allocated the batch is kept and retried after
+  5 s; new observations are counted as dropped while it is full.
+- CLI (serial or remote admin): `beacon.channel <32|64 hex>` / `beacon.channel clear` / `beacon.channel` (shows set and
+  the hash byte only, never the secret), `beacon.window [secs]`, `beacon.log on|off` (prints each beacon heard),
+  `beacon.stats`. The channel secret and window are saved in `/beacon_rpt`. Without a channel set the repeater only
+  logs, which is the milestone 2 behaviour.
+
+Not yet done or verified:
+- Never run on hardware: no check that RSSI/SNR look right, that the beacon is seen and not forwarded, or that a report
+  reaches a companion on the same channel.
+- Hop limit for reports (open question 1) is not applied; reports flood like any other `GRP_DATA`.
+- Repeater signatures on reports (open question 2) and forwarding the reserved beacon bytes (open question 3) are not
+  implemented.
+- The report window, 8-byte prefixes and entry layout are first guesses pending the airtime measurements in milestone 5.
 
 ## Decisions
 

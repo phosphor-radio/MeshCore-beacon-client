@@ -468,6 +468,9 @@ const char *MyMesh::getLogDateTime() {
 }
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#ifdef WITH_BEACON_REPORTER
+  last_rx_rssi = rssi;   // called right after the radio read, before the packet is processed
+#endif
 #if MESH_PACKET_LOGGING
   Serial.print(getLogDateTime());
   Serial.print(" RAW: ");
@@ -657,6 +660,12 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
       putNeighbour(id, timestamp, packet->getSNR());
     }
+#ifdef WITH_BEACON_REPORTER
+    // beacons only ever send DIRECT zero-hop adverts, so a flood advert carrying the marker is not a real beacon
+    else if (packet->isRouteDirect() && beaconIsBeaconAdvert(parser)) {
+      onBeaconHeard(id, timestamp, parser.getFeat1(), packet->getSNR());
+    }
+#endif
   }
 }
 
@@ -883,6 +892,16 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   region_load_active = false;
   recv_pkt_region = NULL;
 
+#ifdef WITH_BEACON_REPORTER
+  beacon_channel_set = false;
+  beacon_log = false;
+  beacon_window_secs = BEACON_REPORT_WINDOW_SECS;
+  beacon_flush_at = 0;
+  last_rx_rssi = 0;
+  beacon_heard = beacon_reported = beacon_dropped = beacon_send_fail = 0;
+  memset(&beacon_channel, 0, sizeof(beacon_channel));
+#endif
+
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
 #endif
@@ -985,6 +1004,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
 
   board.attachDynamicPrefs(_prefs.getCustom());
+
+#ifdef WITH_BEACON_REPORTER
+  beaconBegin();
+#endif
 
   updateAdvertTimer();
   updateFloodAdvertTimer();
@@ -1272,6 +1295,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       Serial.printf("\n");
     }
     reply[0] = 0;
+#ifdef WITH_BEACON_REPORTER
+  } else if (memcmp(command, "beacon.", 7) == 0) {
+    if (!handleBeaconCommand(command, reply)) strcpy(reply, "Err - unknown beacon command");
+#endif
   } else if (memcmp(command, "discover.neighbors", 18) == 0) {
     const char* sub = command + 18;
     while (*sub == ' ') sub++;
@@ -1285,6 +1312,168 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
 }
+
+#ifdef WITH_BEACON_REPORTER
+
+static File openBeaconPrefsWrite(FILESYSTEM* fs) {
+  #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    fs->remove(BEACON_REPORT_PREFS_FILE);
+    return fs->open(BEACON_REPORT_PREFS_FILE, FILE_O_WRITE);
+  #elif defined(RP2040_PLATFORM)
+    return fs->open(BEACON_REPORT_PREFS_FILE, "w");
+  #else
+    return fs->open(BEACON_REPORT_PREFS_FILE, "w", true);
+  #endif
+}
+
+// persisted separately from NodePrefs: magic, report window, 'channel set' flag, channel secret (the hash is derived)
+struct BeaconReportPrefs {
+  uint32_t magic;
+  uint32_t window_secs;
+  uint8_t  channel_set;
+  uint8_t  secret[PUB_KEY_SIZE];
+};
+
+static void deriveChannelHash(mesh::GroupChannel& ch) {
+  static const uint8_t zeroes[16] = { 0 };
+  int key_len = memcmp(&ch.secret[16], zeroes, 16) == 0 ? 16 : 32;   // same rule as BaseChatMesh::setChannel()
+  mesh::Utils::sha256(ch.hash, sizeof(ch.hash), ch.secret, key_len);
+}
+
+void MyMesh::beaconBegin() {
+  if (!_fs->exists(BEACON_REPORT_PREFS_FILE)) return;
+  #if defined(RP2040_PLATFORM)
+    File file = _fs->open(BEACON_REPORT_PREFS_FILE, "r");
+  #else
+    File file = _fs->open(BEACON_REPORT_PREFS_FILE);
+  #endif
+  if (!file) return;
+  BeaconReportPrefs p;
+  if (file.read((uint8_t*)&p, sizeof(p)) == sizeof(p) && p.magic == BEACON_REPORT_PREFS_MAGIC) {
+    if (p.window_secs >= 1 && p.window_secs <= 3600) beacon_window_secs = p.window_secs;
+    if (p.channel_set) {
+      memcpy(beacon_channel.secret, p.secret, sizeof(p.secret));
+      deriveChannelHash(beacon_channel);
+      beacon_channel_set = true;
+    }
+  }
+  file.close();
+}
+
+bool MyMesh::saveBeaconPrefs() {
+  BeaconReportPrefs p;
+  memset(&p, 0, sizeof(p));
+  p.magic = BEACON_REPORT_PREFS_MAGIC;
+  p.window_secs = beacon_window_secs;
+  p.channel_set = beacon_channel_set;
+  if (beacon_channel_set) memcpy(p.secret, beacon_channel.secret, sizeof(p.secret));
+
+  File file = openBeaconPrefsWrite(_fs);
+  if (!file) return false;
+  bool ok = file.write((uint8_t*)&p, sizeof(p)) == sizeof(p);
+  file.close();
+  return ok;
+}
+
+void MyMesh::onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t batt_mv, float snr) {
+  beacon_heard++;
+
+  BeaconObservation o;
+  memcpy(o.beacon_id, id.pub_key, BEACON_REPORT_ID_LEN);
+  o.counter = counter;
+  o.rssi = beaconClampInt8(last_rx_rssi);
+  o.snr = beaconClampInt8(snr * 4.0f);
+  o.batt_mv = batt_mv;
+
+  if (beacon_log) {
+    Serial.print("BEACON ");
+    mesh::Utils::printHex(Serial, id.pub_key, BEACON_REPORT_ID_LEN);
+    Serial.printf(" counter=%lu rssi=%d snr=%.2f batt=%umV\r\n", (unsigned long)counter, (int)o.rssi, snr, (unsigned)batt_mv);
+  }
+
+  if (!beacon_channel_set) return;   // nowhere to report to, the log above is all we do
+
+  if (!beacon_batch.add(o)) {        // still full: an earlier flush could not allocate a packet
+    beacon_dropped++;
+    return;
+  }
+  if (beacon_batch.isFull()) {
+    flushBeaconReports();
+  } else if (beacon_flush_at == 0) {
+    beacon_flush_at = futureMillis(beacon_window_secs * 1000UL);
+  }
+}
+
+void MyMesh::flushBeaconReports() {
+  beacon_flush_at = 0;
+  int count = beacon_batch.count();
+  if (count == 0 || !beacon_channel_set) return;
+
+  uint8_t temp[3 + MAX_GROUP_DATA_LENGTH];   // same framing as BaseChatMesh::sendGroupData()
+  int len = beacon_batch.encode(&temp[3], self_id.pub_key);
+  temp[0] = (uint8_t)(BEACON_REPORT_DATA_TYPE & 0xFF);
+  temp[1] = (uint8_t)(BEACON_REPORT_DATA_TYPE >> 8);
+  temp[2] = (uint8_t)len;
+
+  mesh::Packet* pkt = len > 0 ? createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, beacon_channel, temp, 3 + len) : NULL;
+  if (pkt == NULL) {   // packet pool exhausted: keep the batch and try again shortly
+    beacon_send_fail++;
+    beacon_flush_at = futureMillis(5000);
+    return;
+  }
+  sendFloodScoped(default_scope, pkt, 0, _prefs.path_hash_mode + 1);
+  beacon_reported += count;
+  beacon_batch.clear();
+}
+
+bool MyMesh::handleBeaconCommand(char* command, char* reply) {
+  if (strcmp(command, "beacon.channel") == 0) {   // never echo the secret, show whether it is set and its hash
+    if (beacon_channel_set) sprintf(reply, "> set, hash %02X", (uint32_t)beacon_channel.hash[0]);
+    else strcpy(reply, "> not set");
+  } else if (memcmp(command, "beacon.channel ", 15) == 0) {   // beacon.channel <32 or 64 hex chars> | clear
+    const char* arg = &command[15];
+    if (strcmp(arg, "clear") == 0) {
+      beacon_channel_set = false;
+      memset(&beacon_channel, 0, sizeof(beacon_channel));
+      beacon_batch.clear();
+      beacon_flush_at = 0;
+      strcpy(reply, saveBeaconPrefs() ? "OK - report channel cleared" : "Err - save failed");
+      return true;
+    }
+    size_t n = strlen(arg);
+    if (n != 32 && n != 64) { strcpy(reply, "Err - need 32 or 64 hex chars"); return true; }
+    for (size_t i = 0; i < n; i++) {
+      if (!isxdigit((unsigned char)arg[i])) { strcpy(reply, "Err - bad hex"); return true; }
+    }
+    memset(beacon_channel.secret, 0, sizeof(beacon_channel.secret));
+    mesh::Utils::fromHex(beacon_channel.secret, n / 2, arg);
+    deriveChannelHash(beacon_channel);
+    beacon_channel_set = true;
+    strcpy(reply, saveBeaconPrefs() ? "OK" : "Err - save failed");
+  } else if (strcmp(command, "beacon.window") == 0) {
+    sprintf(reply, "> %lu secs", (unsigned long)beacon_window_secs);
+  } else if (memcmp(command, "beacon.window ", 14) == 0) {
+    uint32_t secs = strtoul(&command[14], NULL, 10);
+    if (secs < 1 || secs > 3600) {
+      strcpy(reply, "Err - window must be 1-3600 secs");
+    } else {
+      beacon_window_secs = secs;
+      strcpy(reply, saveBeaconPrefs() ? "OK" : "Err - save failed");
+    }
+  } else if (memcmp(command, "beacon.log ", 11) == 0) {
+    beacon_log = strcmp(&command[11], "on") == 0;
+    strcpy(reply, beacon_log ? "OK - logging beacons to serial" : "OK");
+  } else if (strcmp(command, "beacon.stats") == 0) {
+    sprintf(reply, "heard %lu, reported %lu, dropped %lu, send fail %lu, pending %d",
+            (unsigned long)beacon_heard, (unsigned long)beacon_reported, (unsigned long)beacon_dropped,
+            (unsigned long)beacon_send_fail, beacon_batch.count());
+  } else {
+    return false;
+  }
+  return true;
+}
+
+#endif // WITH_BEACON_REPORTER
 
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
@@ -1306,6 +1495,12 @@ void MyMesh::loop() {
 
     updateAdvertTimer(); // schedule next local advert
   }
+
+#ifdef WITH_BEACON_REPORTER
+  if (beacon_flush_at && millisHasNowPassed(beacon_flush_at)) {
+    flushBeaconReports();
+  }
+#endif
 
   if (set_radio_at && millisHasNowPassed(set_radio_at)) { // apply pending (temporary) radio params
     set_radio_at = 0;                                     // clear timer
@@ -1335,6 +1530,9 @@ void MyMesh::loop() {
 bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
   if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
+#endif
+#ifdef WITH_BEACON_REPORTER
+  if (beacon_batch.count() > 0) return true;  // observations waiting for the flush timer
 #endif
   return _mgr->getOutboundTotal() > 0;
 }

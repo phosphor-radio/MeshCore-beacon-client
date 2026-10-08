@@ -37,6 +37,16 @@
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
 
+#ifdef WITH_BEACON_REPORTER
+  #include <helpers/BeaconAdvert.h>
+  #include <helpers/BeaconReport.h>
+  #ifndef BEACON_REPORT_WINDOW_SECS
+    #define BEACON_REPORT_WINDOW_SECS  60   // flush a partial batch this long after its first observation
+  #endif
+  #define BEACON_REPORT_PREFS_FILE   "/beacon_rpt"
+  #define BEACON_REPORT_PREFS_MAGIC  0xBEAC0101
+#endif
+
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
 #endif
@@ -110,6 +120,16 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_sf;
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
+#ifdef WITH_BEACON_REPORTER
+  BeaconReportBatch beacon_batch;
+  mesh::GroupChannel beacon_channel;       // private report channel, provisioned with 'beacon.channel'
+  bool beacon_channel_set;
+  bool beacon_log;                         // print every beacon heard to serial (not persisted)
+  uint32_t beacon_window_secs;
+  unsigned long beacon_flush_at;           // 0 when the batch is empty
+  float last_rx_rssi;                      // RSSI of the packet currently being processed
+  uint32_t beacon_heard, beacon_reported, beacon_dropped, beacon_send_fail;
+#endif
 #if defined(WITH_RS232_BRIDGE)
   RS232Bridge bridge;
 #elif defined(WITH_ESPNOW_BRIDGE)
@@ -123,6 +143,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   mesh::Packet* createSelfAdvert();
+#ifdef WITH_BEACON_REPORTER
+  void beaconBegin();
+  void onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t batt_mv, float snr);
+  void flushBeaconReports();
+  bool saveBeaconPrefs();
+  bool handleBeaconCommand(char* command, char* reply);
+#endif
 
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
