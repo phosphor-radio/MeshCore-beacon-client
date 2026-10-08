@@ -253,6 +253,8 @@ Estimates, to be validated by measurement.
 
 ## Base
 
+Detailed plan, architecture and phases: [beacon-base.md](beacon-base.md).
+
 - A companion node on the private channel; the host app receives `RESP_CODE_CHANNEL_DATA_RECV` frames.
 - Enforces everything in "Replay checks at the base", with state persisted so a restart does not lose high-water marks.
 - Keeps a table of repeater locations and of the latest observations per beacon, and records battery levels.
