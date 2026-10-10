@@ -488,7 +488,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
   - `2`: 3 Byte hash size (16,777,216 unique ids)[21 max flood]
   - `3`: DO NOT USE (Reserved) 
 
-**Default:** `0`
+**Default:** `0` (`2` on beacon repeater builds, for new installs; a value already saved on the node is kept)
 
 **Note:** the 'path.hash.mode' sets the low-level ID/hash encoding size used when the repeater adverts. This setting has no impact on what packet ID/hash size this repeater forwards, all sizes should be forwarded on firmware >= 1.14. This feature was added in firmware 1.14
 

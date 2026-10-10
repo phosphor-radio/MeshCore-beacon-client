@@ -44,6 +44,9 @@
   #ifndef BEACON_REPORT_WINDOW_SECS
     #define BEACON_REPORT_WINDOW_SECS  60   // flush a partial batch this long after its first observation
   #endif
+  #ifndef BEACON_PATH_HASH_MODE
+    #define BEACON_PATH_HASH_MODE  2    // default 'path.hash.mode' for new installs: 3-byte path hashes (0 = 1 byte, 1 = 2 bytes)
+  #endif
   #ifndef BEACON_NAMES_REFRESH_HOURS
     #define BEACON_NAMES_REFRESH_HOURS  4   // announce a beacon's name again this often, 0 = only on first sight or change
   #endif

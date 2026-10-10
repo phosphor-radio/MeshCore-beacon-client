@@ -932,6 +932,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.interference_threshold = 0; // disabled
   _prefs.cad_enabled = 0;            // hardware CAD before TX (off by default; 'set cad on')
   _prefs.loop_detect = LOOP_DETECT_MINIMAL;
+#ifdef WITH_BEACON_REPORTER
+  _prefs.path_hash_mode = BEACON_PATH_HASH_MODE;   // a saved 'path.hash.mode' still overrides this
+#endif
 
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled
