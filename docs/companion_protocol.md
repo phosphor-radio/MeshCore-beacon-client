@@ -31,12 +31,13 @@ All secrets, hashes, and cryptographic values shown in this guide are example va
 1. [BLE Connection](#ble-connection)
 2. [Packet Structure](#packet-structure)
 3. [Commands](#commands)
-4. [Channel Management](#channel-management)
-5. [Message Handling](#message-handling)
-6. [Response Parsing](#response-parsing)
-7. [Example Implementation Flow](#example-implementation-flow)
-8. [Best Practices](#best-practices)
-9. [Troubleshooting](#troubleshooting)
+4. [Remote Administration (Login and CLI)](#remote-administration-login-and-cli)
+5. [Channel Management](#channel-management)
+6. [Message Handling](#message-handling)
+7. [Response Parsing](#response-parsing)
+8. [Example Implementation Flow](#example-implementation-flow)
+9. [Best Practices](#best-practices)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -449,6 +450,189 @@ Byte 0: 0x14
 ```
 
 **Response**: `PACKET_BATTERY` (0x0C) with battery millivolts and storage information
+
+---
+
+## Remote Administration (Login and CLI)
+
+A host can administer a repeater (or room server or sensor) over the mesh through its companion: add the repeater as a
+contact, log in, send CLI commands as text messages, and read the replies from the companion's message queue. This section
+is derived from the source (`examples/companion_radio/MyMesh.cpp`, `src/helpers/BaseChatMesh.cpp`,
+`examples/simple_repeater/MyMesh.cpp`, `src/helpers/ClientACL.cpp`), not from observed behaviour on a device.
+
+Typical sequence:
+
+1. `CMD_ADD_UPDATE_CONTACT` once per repeater (the companion only talks to contacts it knows).
+2. `CMD_SEND_LOGIN`, then wait for `PUSH_CODE_LOGIN_SUCCESS`. A failed login produces **no frame at all** (see below).
+3. `CMD_SEND_TXT_MSG` with `txt_type` 1 (CLI_DATA) for each command. The reply arrives later, as a contact message.
+
+All integers are little-endian. Error codes are the `PACKET_ERROR` codes: 1 unsupported command, 2 not found, 3 table full,
+4 bad state, 5 file I/O error, 6 illegal argument.
+
+### Add or update a contact
+
+**Command** (`CMD_ADD_UPDATE_CONTACT`, 9):
+```
+Byte 0:        0x09
+Bytes 1-32:    Public key (32 bytes)
+Byte 33:       Type (ADV_TYPE: 1 chat, 2 repeater, 3 room, 4 sensor)
+Byte 34:       Flags
+Byte 35:       Out path length (0xFF = unknown, so messages are flooded)
+Bytes 36-99:   Out path (64 bytes, unused bytes zero)
+Bytes 100-131: Name (32 bytes, null padded)
+Bytes 132-135: Last advert timestamp
+Bytes 136-139: Latitude x 1e6, optional (int32)
+Bytes 140-143: Longitude x 1e6, optional (int32)
+Bytes 144-147: Last modified, optional
+```
+**Response:** `PACKET_OK`, or `PACKET_ERROR` / `ERR_CODE_TABLE_FULL` when the contact table is full. An existing key is
+updated in place, including its out path. Contacts are written to flash a few seconds later.
+
+**Note:** the firmware only checks that the frame is at least 36 bytes, but it reads the fields up to byte 135 regardless.
+Always send at least 136 bytes; a shorter frame leaves the missing fields holding stale bytes from an earlier command. Use
+out path length `0xFF` for a repeater whose route is not known. A length of 0 means "direct, zero hops".
+
+### Reset a contact's stored path
+
+**Command** (`CMD_RESET_PATH`, 13): `0x0D` followed by the 32-byte public key. **Response:** `PACKET_OK`, or
+`ERR_CODE_NOT_FOUND`. The contact goes back to "path unknown", so the next message is flooded. After a flooded login or
+command the repeater answers with a path return, and the companion stores that path (`BaseChatMesh::onContactPathRecv`),
+so later messages go direct until the path is reset or replaced.
+
+### Log in
+
+**Command** (`CMD_SEND_LOGIN`, 26):
+```
+Byte 0:      0x1A
+Bytes 1-32:  Repeater public key (32 bytes, must already be a contact)
+Bytes 33+:   Password (UTF-8, no terminator). Empty is allowed. Truncated to 15 characters by the firmware.
+```
+**Response:** `ERR_CODE_NOT_FOUND` for an unknown contact, `ERR_CODE_TABLE_FULL` if no packet could be built, otherwise
+`RESP_CODE_SENT`:
+```
+Byte 0:      0x06
+Byte 1:      1 if the login was flooded, 0 if sent along a stored path
+Bytes 2-5:   Tag: the first 4 bytes of the repeater's public key
+Bytes 6-9:   Estimated round-trip timeout in milliseconds (uint32)
+```
+The packet carries the companion's RTC as its timestamp (made unique per send). Only one login can be pending: sending a
+new login, or another request of the status, telemetry or binary kinds, clears the previous pending request. **The companion has no timeout of
+its own**; the host should give up after the estimated timeout plus a margin.
+
+**Result, asynchronous:** `PUSH_CODE_LOGIN_SUCCESS` (0x85):
+```
+Byte 0:      0x85
+Byte 1:      1 if the login has admin rights, else 0
+Bytes 2-7:   Repeater public key prefix (6 bytes)
+Bytes 8-11:  Repeater's clock when it replied (epoch seconds)
+Byte 12:     ACL permissions (0 guest, 1 read-only, 2 read-write, 3 admin)
+Byte 13:     Repeater FIRMWARE_VER_LEVEL
+```
+A legacy repeater reply is shorter: `0x85`, `0x00`, then the 6-byte prefix.
+`PUSH_CODE_LOGIN_FAIL` (0x86, `0x86`, `0x00`, 6-byte prefix) is sent by the companion only when the response is neither of
+those. **A repeater never sends a failure response**, so a rejected login is only visible as a timeout.
+
+### Send a CLI command
+
+**Command** (`CMD_SEND_TXT_MSG`, 2):
+```
+Byte 0:      0x02
+Byte 1:      txt_type: 0 plain, 1 CLI_DATA, 3 CLI_COMMAND (2, signed plain, is refused)
+Byte 2:      Attempt (low 2 bits are used)
+Bytes 3-6:   Timestamp (ignored for types 1 and 3, see below)
+Bytes 7-12:  Recipient public key prefix (6 bytes, must match a contact)
+Bytes 13+:   Command text (UTF-8), at least 1 byte, at most 160 bytes
+```
+For types 1 and 3 the host's timestamp is **replaced by the companion's RTC** (made unique) so that it cannot trip the
+repeater's replay protection. **Use type 1 for repeaters.** Type 0 is accepted too but makes the repeater send a legacy ACK.
+
+**Response:** `ERR_CODE_NOT_FOUND` (unknown contact), `ERR_CODE_UNSUPPORTED_CMD` (bad `txt_type`), `ERR_CODE_TABLE_FULL`
+(no packet could be built **or the text is longer than 160 bytes**), otherwise `RESP_CODE_SENT` with the layout above,
+except bytes 2-5 are 0 because no ACK is expected for CLI messages. `RESP_CODE_SENT` therefore only means "transmitted".
+
+### Receive the reply
+
+A reply is queued as a contact message and announced with `PUSH_CODE_MSG_WAITING` (0x83). Fetch it with
+`CMD_SYNC_NEXT_MESSAGE` (0x0A). The frame is `RESP_CODE_CONTACT_MSG_RECV_V3` (16) when the host declared protocol
+version 3 or higher in `CMD_DEVICE_QUERY`, otherwise `RESP_CODE_CONTACT_MSG_RECV` (7):
+```
+V3:      0x10, SNR x4 (int8), 2 reserved bytes, then the fields below
+Legacy:  0x07, then the fields below
+Fields:  sender public key prefix (6), path length (1), txt_type (1), sender timestamp (4), text (rest of the frame)
+```
+- Path length is `0xFF` when the reply came by a direct route, otherwise the encoded path length of a flooded reply.
+- A CLI reply has `txt_type` 1 and the repeater's clock as its timestamp. The text is not terminated; its length is the
+  rest of the frame.
+- There is no tag tying a reply to a command. Match by sender prefix and order, or put an `NN|` prefix on the command
+  (see below) and match on that.
+- A command that produces no reply text produces no message at all.
+
+### Device clock
+
+| Command | Frame | Response |
+|---|---|---|
+| `CMD_GET_DEVICE_TIME` (5) | `0x05` | `RESP_CODE_CURR_TIME` (9): `0x09` + epoch seconds (uint32) |
+| `CMD_SET_DEVICE_TIME` (6) | `0x06` + epoch seconds (uint32) | `PACKET_OK`, or `ERR_CODE_ILLEGAL_ARG` if the new time is **earlier** than the current one (equal is accepted) |
+
+The companion's clock stamps logins and CLI messages, which repeaters check for replays, so a wrong clock matters:
+- **nRF52:** the clock is volatile and starts at 15 May 2024 (1715770351) at every boot, unless an I2C RTC chip (DS3231,
+  RV3028, PCF8563 or RX8130CE) is detected, which then keeps the time.
+- **ESP32:** the time is kept in RTC memory across software resets, watchdog and crash resets, so it resumes at roughly the
+  pre-reset time. It is lost on power loss, and then starts at 1 March 2026.
+- The companion never writes its clock to flash. Set it after every boot where it can be lost, and remember it cannot be
+  set backwards.
+
+### What the repeater does with logins and commands
+
+These rules come from the repeater (`MyMesh::handleLoginReq`, `onPeerDataRecv`, `ClientACL`).
+
+- **Who may use the CLI.** Only an **admin** client in the repeater's ACL. A client gets there by logging in with the admin
+  password, or by `setperm <pubkey> 3` at the repeater. A client with any other role (guest, or read-only / read-write set
+  with `setperm`) can log in, but its CLI messages are **silently ignored**.
+- **A login success is not proof of admin rights.** The success push carries the granted role (byte 1 is 1 for admin, byte
+  12 is the ACL permission). Check it before sending commands.
+- **Passwords.** At most 15 characters. The admin password gives the admin role, the guest password gives guest. **Any
+  other password gets no reply.** The guest password is empty by default, so an empty password from an unknown key
+  **succeeds as a guest** unless a guest password has been set.
+- **Empty password for a known key.** If the sender's key is already in the repeater's ACL, an empty password succeeds with
+  the role it already has. No password and no timestamp are checked in that case.
+- **Replay checks.** A password login needs a timestamp **greater than** the client's last one, otherwise there is **no
+  reply**. A CLI message needs a timestamp **greater than or equal to** the last one. An equal timestamp is treated as a
+  retry: the command is not run again and nothing is sent back. Older timestamps are ignored without a reply. The last
+  timestamp is held in RAM only, so it is 0 again after the repeater reboots.
+- **Persistence.** An admin login is written to flash a few seconds after it succeeds; guest entries are not. After a
+  reboot the key, role and shared secret are restored, so an empty-password login works again, but not the last timestamp.
+- **Full ACL (32 clients).** A new client evicts the non-admin client with the oldest activity. If every client is an
+  admin, the last slot is overwritten.
+- **Routing of replies.** One packet each. A login that arrived flooded is answered with a flooded path return; a login that
+  arrived direct is answered along the supplied or stored path, else flooded. A CLI reply goes along the repeater's stored
+  path to the client if it has one, else it is flooded.
+- **Reply size.** Up to 160 characters in a single packet. The firmware does not truncate command output, so commands must
+  keep their replies short.
+- **The `NN|` prefix.** After skipping leading spaces, if a command is longer than 4 characters and its third character is
+  `|`, the first three characters are copied to the start of the reply and the rest is run as the command: `7f|get name`
+  returns `7f|> name`. Any two characters work. The prefix is handled before any command runs, so it applies to every
+  command and uses 3 of the 160 characters.
+- **Serial-only commands.** Some commands only act when they come from the serial console (for example `set freq`, `get
+  prv.key`, `erase`); over the mesh they answer `Unknown command`.
+
+### Flood scope
+
+A companion sends logins and commands as **floods** while a contact's path is unknown. By default its flood scope is empty,
+so they are **un-scoped** floods. A repeater forwards a flood only if its region rules allow it: a repeater with its
+wildcard region denied (`region denyf *`), or `flood.max.unscoped` set to 0, drops un-scoped floods instead of forwarding
+them. The destination repeater still handles a request it receives directly, so a repeater within radio range works either way.
+
+| Command | Frame | Effect |
+|---|---|---|
+| `CMD_SET_DEFAULT_FLOOD_SCOPE` (63) | `0x3F`, region name (31 bytes, null padded), key (16 bytes) | Persisted default scope. With no data after the command byte it clears the default. |
+| `CMD_GET_DEFAULT_FLOOD_SCOPE` (64) | `0x40` | `RESP_CODE_DEFAULT_FLOOD_SCOPE` (28): the same 47 bytes, or just the code when none is set. |
+| `CMD_SET_FLOOD_SCOPE_KEY` (54), v8+ | `0x36`, `0x00`, key (16 bytes) | Scope override until the companion reboots. Without a key it clears the override. |
+| `CMD_SET_FLOOD_SCOPE_KEY` (54), v12+ | `0x36`, `0x01` | Force un-scoped floods until the next setting. |
+
+The key for a region named `usa` is the first 16 bytes of `SHA-256("#usa")`, which is how repeaters derive it
+(`RegionMap::getTransportKeysFor`, `TransportKeyStore::getAutoKeyFor`). The repeaters must have that region configured and
+not set to deny flood. A repeater answers a scoped request in the same scope; it answers an un-scoped flood un-scoped.
 
 ---
 
