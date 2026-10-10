@@ -21,7 +21,7 @@ static void handleCommand(char* cmd) {
   if (strcmp(cmd, "help") == 0) {
     Serial.println("  ver | pubkey | advert | reboot");
     Serial.println("  get interval|name|counter|batt|radio|tx");
-    Serial.println("  set interval <secs> | set name <name>");
+    Serial.println("  set interval <secs> | set name <name>|auto");
     Serial.println("  set radio <freq>,<bw>,<sf>,<cr> | set tx <dbm>");
   } else if (strcmp(cmd, "ver") == 0) {
     Serial.println("  -> " BEACON_FW_VERSION);
@@ -37,7 +37,8 @@ static void handleCommand(char* cmd) {
   } else if (strcmp(cmd, "get interval") == 0) {
     Serial.printf("  -> %lu secs\r\n", beacon.getIntervalSecs());
   } else if (strcmp(cmd, "get name") == 0) {
-    Serial.printf("  -> %s\r\n", beacon.getName());
+    char buf[BEACON_DEFAULT_NAME_LEN + 1];
+    Serial.printf("  -> %s (%s)\r\n", beacon.getName(buf), beacon.isNameAuto() ? "auto" : "explicit");
   } else if (strcmp(cmd, "get radio") == 0) {
     Serial.printf("  -> %.3f,%.1f,%d,%d\r\n", beacon.getFreq(), beacon.getBandwidth(), beacon.getSpreadFactor(), beacon.getCodingRate());
   } else if (strcmp(cmd, "get tx") == 0) {
@@ -60,8 +61,8 @@ static void handleCommand(char* cmd) {
     Serial.println(ok ? "  -> OK" : "  -> ERROR: usage set radio <freq MHz>,<bw kHz>,<sf 5-12>,<cr 5-8>");
   } else if (memcmp(cmd, "set tx ", 7) == 0) {
     Serial.println(beacon.setTxPower(atoi(&cmd[7])) ? "  -> OK" : "  -> ERROR: tx power must be -9 to 22 dBm");
-  } else if (memcmp(cmd, "set name ", 9) == 0) {
-    Serial.println(beacon.setName(&cmd[9]) ? "  -> OK" : "  -> ERROR: invalid name");
+  } else if (strcmp(cmd, "set name") == 0 || memcmp(cmd, "set name ", 9) == 0) {   // no argument means auto
+    Serial.println(beacon.setName(cmd[8] ? &cmd[9] : "") ? "  -> OK" : "  -> ERROR: invalid name");
   } else {
     Serial.println("  -> unknown command, try 'help'");
   }
@@ -111,6 +112,8 @@ void setup() {
 
   if (Serial) {
     Serial.print("Beacon ID: "); mesh::Utils::printHex(Serial, beacon.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
+    char name[BEACON_DEFAULT_NAME_LEN + 1];
+    Serial.printf("Beacon name: %s (%s)\r\n", beacon.getName(name), beacon.isNameAuto() ? "auto" : "explicit");
   }
 
   next_tx_at = millis() + random(1000, 5000);   // first advert shortly after boot, randomised so a batch of beacons don't collide

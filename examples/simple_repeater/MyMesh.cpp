@@ -663,7 +663,7 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
 #ifdef WITH_BEACON_REPORTER
     // beacons only ever send DIRECT zero-hop adverts, so a flood advert carrying the marker is not a real beacon
     else if (packet->isRouteDirect() && beaconIsBeaconAdvert(parser)) {
-      onBeaconHeard(id, timestamp, parser.getFeat1(), packet->getSNR());
+      onBeaconHeard(id, timestamp, parser.getFeat1(), packet->getSNR(), parser.hasName() ? parser.getName() : NULL);
     }
 #endif
   }
@@ -900,6 +900,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   last_rx_rssi = 0;
   beacon_heard = beacon_reported = beacon_dropped = beacon_send_fail = 0;
   memset(&beacon_channel, 0, sizeof(beacon_channel));
+  beacon_names_on = true;
+  beacon_name_refresh_hours = BEACON_NAMES_REFRESH_HOURS;
+  beacon_names_flush_at = 0;
+  beacon_names_sent = beacon_names_dropped = 0;
 #endif
 
 #if MAX_NEIGHBOURS
@@ -1326,13 +1330,17 @@ static File openBeaconPrefsWrite(FILESYSTEM* fs) {
   #endif
 }
 
-// persisted separately from NodePrefs: magic, report window, 'channel set' flag, channel secret (the hash is derived)
+// persisted separately from NodePrefs: magic, report window, 'channel set' flag, channel secret (the hash is derived),
+// and since V2 the name settings.  V1 files are still read, with the name settings at their defaults.
 struct BeaconReportPrefs {
   uint32_t magic;
   uint32_t window_secs;
   uint8_t  channel_set;
   uint8_t  secret[PUB_KEY_SIZE];
+  uint8_t  names_on;               // V2
+  uint16_t name_refresh_hours;     // V2
 };
+static_assert(sizeof(BeaconReportPrefs) == 44, "V1 and V2 files must stay the same size");
 
 static void deriveChannelHash(mesh::GroupChannel& ch) {
   static const uint8_t zeroes[16] = { 0 };
@@ -1349,7 +1357,12 @@ void MyMesh::beaconBegin() {
   #endif
   if (!file) return;
   BeaconReportPrefs p;
-  if (file.read((uint8_t*)&p, sizeof(p)) == sizeof(p) && p.magic == BEACON_REPORT_PREFS_MAGIC) {
+  if (file.read((uint8_t*)&p, sizeof(p)) == sizeof(p)
+      && (p.magic == BEACON_REPORT_PREFS_MAGIC || p.magic == BEACON_REPORT_PREFS_MAGIC_V1)) {
+    if (p.magic == BEACON_REPORT_PREFS_MAGIC) {
+      beacon_names_on = p.names_on != 0;
+      if (p.name_refresh_hours <= BEACON_NAMES_MAX_REFRESH_HOURS) beacon_name_refresh_hours = p.name_refresh_hours;
+    }
     if (p.window_secs >= 1 && p.window_secs <= 3600) beacon_window_secs = p.window_secs;
     if (p.channel_set) {
       memcpy(beacon_channel.secret, p.secret, sizeof(p.secret));
@@ -1366,6 +1379,8 @@ bool MyMesh::saveBeaconPrefs() {
   p.magic = BEACON_REPORT_PREFS_MAGIC;
   p.window_secs = beacon_window_secs;
   p.channel_set = beacon_channel_set;
+  p.names_on = beacon_names_on;
+  p.name_refresh_hours = beacon_name_refresh_hours;
   if (beacon_channel_set) memcpy(p.secret, beacon_channel.secret, sizeof(p.secret));
 
   File file = openBeaconPrefsWrite(_fs);
@@ -1375,7 +1390,12 @@ bool MyMesh::saveBeaconPrefs() {
   return ok;
 }
 
-void MyMesh::onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t batt_mv, float snr) {
+// names are untrusted text from the air: never let control characters or escape sequences reach the terminal
+static void printSanitized(const char* s) {
+  for (; *s; s++) Serial.print((uint8_t)*s < 0x20 || *s == 0x7F ? '?' : *s);
+}
+
+void MyMesh::onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t batt_mv, float snr, const char* name) {
   beacon_heard++;
 
   BeaconObservation o;
@@ -1388,10 +1408,14 @@ void MyMesh::onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t 
   if (beacon_log) {
     Serial.print("BEACON ");
     mesh::Utils::printHex(Serial, id.pub_key, BEACON_REPORT_ID_LEN);
-    Serial.printf(" counter=%lu rssi=%d snr=%.2f batt=%umV\r\n", (unsigned long)counter, (int)o.rssi, snr, (unsigned)batt_mv);
+    Serial.printf(" counter=%lu rssi=%d snr=%.2f batt=%umV", (unsigned long)counter, (int)o.rssi, snr, (unsigned)batt_mv);
+    if (name) { Serial.print(" name=\""); printSanitized(name); Serial.print('"'); }
+    Serial.print("\r\n");
   }
 
   if (!beacon_channel_set) return;   // nowhere to report to, the log above is all we do
+
+  if (name && beacon_names_on) announceBeaconName(id, name);   // independent of the report batch below
 
   if (!beacon_batch.add(o)) {        // still full: an earlier flush could not allocate a packet
     beacon_dropped++;
@@ -1402,6 +1426,58 @@ void MyMesh::onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t 
   } else if (beacon_flush_at == 0) {
     beacon_flush_at = futureMillis(beacon_window_secs * 1000UL);
   }
+}
+
+void MyMesh::announceBeaconName(const mesh::Identity& id, const char* name) {
+  int name_len = strlen(name);   // the advert parser NUL terminates, at most 31 bytes
+  if (name_len == 0) return;
+  uint32_t now = (uint32_t)(uptime_millis / 1000);
+  uint32_t hash = beaconNameHash(name, name_len);
+
+  BeaconNameCache::Reason why =
+      beacon_name_cache.check(id.pub_key, hash, now, (uint32_t)beacon_name_refresh_hours * 3600UL);
+  if (why == BeaconNameCache::NONE) return;
+
+  if (!beacon_name_batch.add(id.pub_key, name, name_len)) {
+    flushBeaconNames();   // does not fit: send what we have, then queue this one
+    if (!beacon_name_batch.add(id.pub_key, name, name_len)) {
+      beacon_names_dropped++;   // the flush could not get a packet; not marked, so the next advert tries again
+      return;
+    }
+  }
+  beacon_name_cache.markAnnounced(id.pub_key, hash, now);
+
+  if (beacon_log) {
+    static const char* const reasons[] = { "", "first", "changed", "refresh" };
+    Serial.print("NAME ");
+    mesh::Utils::printHex(Serial, id.pub_key, BEACON_NAMES_ID_LEN);
+    Serial.print(" \""); printSanitized(name); Serial.printf("\" (%s)\r\n", reasons[why]);
+  }
+  if (beacon_names_flush_at == 0) {
+    beacon_names_flush_at = futureMillis(beacon_window_secs * 1000UL);
+  }
+}
+
+void MyMesh::flushBeaconNames() {
+  beacon_names_flush_at = 0;
+  int count = beacon_name_batch.count();
+  if (count == 0 || !beacon_channel_set) return;
+
+  uint8_t temp[3 + MAX_GROUP_DATA_LENGTH];   // same framing as BaseChatMesh::sendGroupData()
+  int len = beacon_name_batch.encode(&temp[3], self_id.pub_key);
+  temp[0] = (uint8_t)(BEACON_NAMES_DATA_TYPE & 0xFF);
+  temp[1] = (uint8_t)(BEACON_NAMES_DATA_TYPE >> 8);
+  temp[2] = (uint8_t)len;
+
+  mesh::Packet* pkt = len > 0 ? createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, beacon_channel, temp, 3 + len) : NULL;
+  if (pkt == NULL) {   // packet pool exhausted: keep the batch and try again shortly
+    beacon_send_fail++;
+    beacon_names_flush_at = futureMillis(5000);
+    return;
+  }
+  sendFloodScoped(default_scope, pkt, BEACON_NAMES_SEND_DELAY_MS, _prefs.path_hash_mode + 1);
+  beacon_names_sent += count;
+  beacon_name_batch.clear();
 }
 
 void MyMesh::flushBeaconReports() {
@@ -1437,6 +1513,8 @@ bool MyMesh::handleBeaconCommand(char* command, char* reply) {
       memset(&beacon_channel, 0, sizeof(beacon_channel));
       beacon_batch.clear();
       beacon_flush_at = 0;
+      beacon_name_batch.clear();
+      beacon_names_flush_at = 0;
       strcpy(reply, saveBeaconPrefs() ? "OK - report channel cleared" : "Err - save failed");
       return true;
     }
@@ -1460,13 +1538,37 @@ bool MyMesh::handleBeaconCommand(char* command, char* reply) {
       beacon_window_secs = secs;
       strcpy(reply, saveBeaconPrefs() ? "OK" : "Err - save failed");
     }
+  } else if (strcmp(command, "beacon.names") == 0) {
+    sprintf(reply, "> %s", beacon_names_on ? "on" : "off");
+  } else if (memcmp(command, "beacon.names ", 13) == 0) {
+    const char* arg = &command[13];
+    if (strcmp(arg, "on") != 0 && strcmp(arg, "off") != 0) {
+      strcpy(reply, "Err - usage: beacon.names on|off");
+    } else {
+      beacon_names_on = strcmp(arg, "on") == 0;
+      if (!beacon_names_on) { beacon_name_batch.clear(); beacon_names_flush_at = 0; }
+      strcpy(reply, saveBeaconPrefs() ? "OK" : "Err - save failed");
+    }
+  } else if (strcmp(command, "beacon.name_refresh") == 0) {
+    if (beacon_name_refresh_hours) sprintf(reply, "> %u hours", (unsigned)beacon_name_refresh_hours);
+    else strcpy(reply, "> 0 (only on first sight or change)");
+  } else if (memcmp(command, "beacon.name_refresh ", 20) == 0) {
+    const char* arg = &command[20];
+    char* end;
+    unsigned long hours = strtoul(arg, &end, 10);
+    if (*arg == 0 || *end != 0 || hours > BEACON_NAMES_MAX_REFRESH_HOURS) {
+      sprintf(reply, "Err - hours must be 0-%d (0 = only on first sight or change)", BEACON_NAMES_MAX_REFRESH_HOURS);
+    } else {
+      beacon_name_refresh_hours = (uint16_t)hours;
+      strcpy(reply, saveBeaconPrefs() ? "OK" : "Err - save failed");
+    }
   } else if (memcmp(command, "beacon.log ", 11) == 0) {
     beacon_log = strcmp(&command[11], "on") == 0;
     strcpy(reply, beacon_log ? "OK - logging beacons to serial" : "OK");
   } else if (strcmp(command, "beacon.stats") == 0) {
-    sprintf(reply, "heard %lu, reported %lu, dropped %lu, send fail %lu, pending %d",
+    sprintf(reply, "heard %lu, reported %lu, dropped %lu, send fail %lu, pending %d, names sent %lu",
             (unsigned long)beacon_heard, (unsigned long)beacon_reported, (unsigned long)beacon_dropped,
-            (unsigned long)beacon_send_fail, beacon_batch.count());
+            (unsigned long)beacon_send_fail, beacon_batch.count(), (unsigned long)beacon_names_sent);
   } else {
     return false;
   }
@@ -1500,6 +1602,9 @@ void MyMesh::loop() {
   if (beacon_flush_at && millisHasNowPassed(beacon_flush_at)) {
     flushBeaconReports();
   }
+  if (beacon_names_flush_at && millisHasNowPassed(beacon_names_flush_at)) {
+    flushBeaconNames();   // after the reports, which go out first
+  }
 #endif
 
   if (set_radio_at && millisHasNowPassed(set_radio_at)) { // apply pending (temporary) radio params
@@ -1532,7 +1637,7 @@ bool MyMesh::hasPendingWork() const {
   if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
 #endif
 #ifdef WITH_BEACON_REPORTER
-  if (beacon_batch.count() > 0) return true;  // observations waiting for the flush timer
+  if (beacon_batch.count() > 0 || beacon_name_batch.count() > 0) return true;  // waiting for a flush timer
 #endif
   return _mgr->getOutboundTotal() > 0;
 }

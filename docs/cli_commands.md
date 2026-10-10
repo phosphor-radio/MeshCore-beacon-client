@@ -20,6 +20,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
   - [Sensors](#sensors-when-sensor-support-is-compiled-in)
   - [Bridge](#bridge-when-bridge-support-is-compiled-in)
   - [Ethernet](#ethernet-when-ethernet-support-is-compiled-in)
+  - [Beacon reporter](#beacon-reporter-when-built-with-with_beacon_reporter)
 
 ---
 
@@ -1196,3 +1197,85 @@ Ethernet support is available on RAK4631 boards with a RAK13800 (W5100S) Etherne
 - Connect with any TCP client (e.g. `nc`, PuTTY) to access the same CLI available over serial.
 
 ---
+
+### Beacon reporter (when built with WITH_BEACON_REPORTER)
+
+Repeaters built with `-D WITH_BEACON_REPORTER=1` (the `*_beacon_repeater` environments) report the beacons they hear to a
+private channel. Two message types are sent on it: observation reports (`0xFFBE`) and name announcements (`0xFFBF`). Nothing
+is sent until a channel is set.
+
+---
+
+#### View or change the report channel
+**Usage:**
+- `beacon.channel`
+- `beacon.channel <hex>`
+- `beacon.channel clear`
+
+**Parameters:**
+- `hex`: the channel secret, 32 hex characters (128-bit, the only size companions support) or 64
+
+**Note:** The secret is saved but never shown; `beacon.channel` only reports whether it is set and the channel's hash byte.
+
+---
+
+#### View or change the report batching window
+**Usage:**
+- `beacon.window`
+- `beacon.window <secs>`
+
+**Parameters:**
+- `secs`: 1-3600; a partial batch is sent this long after its first entry
+
+**Default:** `60`
+
+**Note:** Keep it below the shortest beacon interval, or the base rejects late reports.
+
+---
+
+#### View or change name announcements
+**Usage:**
+- `beacon.names`
+- `beacon.names on`
+- `beacon.names off`
+
+**Default:** `on`
+
+**Note:** Announces each beacon's advertised name so the base can show it: the first time the beacon is heard since boot, when
+its name changes, and every `beacon.name_refresh` hours. Beacons without a name are not announced.
+
+---
+
+#### View or change the name refresh interval
+**Usage:**
+- `beacon.name_refresh`
+- `beacon.name_refresh <hours>`
+
+**Parameters:**
+- `hours`: 0-8760; `0` announces only on first sight or when the name changes
+
+**Default:** `4`
+
+---
+
+#### Print beacons to the serial terminal
+**Usage:** `beacon.log on|off`
+
+**Note:** Prints each beacon heard (`BEACON <id> counter=... rssi=... snr=... batt=...mV name="..."`) and each name
+announcement queued (`NAME <id> "..." (first|changed|refresh)`). Not saved; off after a reboot.
+
+---
+
+#### View beacon counters
+**Usage:** `beacon.stats`
+
+**Output:** beacons heard, observations reported, dropped, send failures, pending in the current batch, and names sent.
+
+---
+
+#### Beacon firmware: name
+The beacon (`examples/beacon`) has its own serial CLI. Its advertised name is `beacon-` plus the first 3 bytes of its public
+key in hex (for example `beacon-f5b165`) unless one is set:
+- `get name` shows the name in use and whether it is `auto` or `explicit`
+- `set name <name>` sets an explicit name (up to 18 bytes)
+- `set name auto` (or `set name` with no argument) goes back to the name derived from the key

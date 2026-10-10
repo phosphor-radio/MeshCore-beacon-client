@@ -40,11 +40,18 @@
 #ifdef WITH_BEACON_REPORTER
   #include <helpers/BeaconAdvert.h>
   #include <helpers/BeaconReport.h>
+  #include <helpers/BeaconNames.h>
   #ifndef BEACON_REPORT_WINDOW_SECS
     #define BEACON_REPORT_WINDOW_SECS  60   // flush a partial batch this long after its first observation
   #endif
+  #ifndef BEACON_NAMES_REFRESH_HOURS
+    #define BEACON_NAMES_REFRESH_HOURS  4   // announce a beacon's name again this often, 0 = only on first sight or change
+  #endif
+  #define BEACON_NAMES_MAX_REFRESH_HOURS  8760   // a year
+  #define BEACON_NAMES_SEND_DELAY_MS  2000  // names yield to reports: reports are sent with no delay
   #define BEACON_REPORT_PREFS_FILE   "/beacon_rpt"
-  #define BEACON_REPORT_PREFS_MAGIC  0xBEAC0101
+  #define BEACON_REPORT_PREFS_MAGIC_V1  0xBEAC0101   // channel and window only
+  #define BEACON_REPORT_PREFS_MAGIC     0xBEAC0102   // adds the name settings
 #endif
 
 #ifdef WITH_BRIDGE
@@ -129,6 +136,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   unsigned long beacon_flush_at;           // 0 when the batch is empty
   float last_rx_rssi;                      // RSSI of the packet currently being processed
   uint32_t beacon_heard, beacon_reported, beacon_dropped, beacon_send_fail;
+  BeaconNameBatch beacon_name_batch;       // name announcements (data_type BEACON_NAMES_DATA_TYPE), see BeaconNames.h
+  BeaconNameCache beacon_name_cache;
+  bool beacon_names_on;
+  uint16_t beacon_name_refresh_hours;
+  unsigned long beacon_names_flush_at;     // 0 when the name batch is empty
+  uint32_t beacon_names_sent, beacon_names_dropped;
 #endif
 #if defined(WITH_RS232_BRIDGE)
   RS232Bridge bridge;
@@ -145,8 +158,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   mesh::Packet* createSelfAdvert();
 #ifdef WITH_BEACON_REPORTER
   void beaconBegin();
-  void onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t batt_mv, float snr);
+  void onBeaconHeard(const mesh::Identity& id, uint32_t counter, uint16_t batt_mv, float snr, const char* name);
+  void announceBeaconName(const mesh::Identity& id, const char* name);
   void flushBeaconReports();
+  void flushBeaconNames();
   bool saveBeaconPrefs();
   bool handleBeaconCommand(char* command, char* reply);
 #endif

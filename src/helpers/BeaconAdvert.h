@@ -28,6 +28,23 @@
 // flags(1) + feat1(2) + feat2(2) + name terminator(1) + reserved
 #define BEACON_MAX_NAME_LEN   (MAX_ADVERT_DATA_SIZE - 6 - BEACON_RESERVED_BYTES)
 
+/*
+ * Default name: "beacon-" + the first 3 bytes of the beacon's public key in lowercase hex ("beacon-f5b165"), so names are
+ * unique out of the box and follow the key.  Used whenever no explicit name has been set.
+ */
+#define BEACON_DEFAULT_NAME_LEN   13
+static_assert(BEACON_DEFAULT_NAME_LEN <= BEACON_MAX_NAME_LEN, "default name must fit the advert");
+
+static inline void beaconDefaultName(char dest[BEACON_DEFAULT_NAME_LEN + 1], const uint8_t* pub_key) {
+  static const char hex[] = "0123456789abcdef";
+  memcpy(dest, "beacon-", 7);
+  for (int i = 0; i < 3; i++) {
+    dest[7 + i * 2] = hex[pub_key[i] >> 4];
+    dest[8 + i * 2] = hex[pub_key[i] & 15];
+  }
+  dest[BEACON_DEFAULT_NAME_LEN] = 0;
+}
+
 static inline bool beaconIsBeaconAdvert(const AdvertDataParser& parser) {
   return parser.isValid() && parser.getType() == ADV_TYPE_SENSOR && parser.getFeat2() == BEACON_FEAT2_MARKER;
 }

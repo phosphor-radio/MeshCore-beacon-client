@@ -82,7 +82,8 @@ bool Beacon::sendAdvert() {
   }
 
   uint8_t app_data[MAX_ADVERT_DATA_SIZE];
-  uint8_t app_data_len = beaconBuildAppData(app_data, readBattMilliVolts(), _prefs.name);
+  char default_name[BEACON_DEFAULT_NAME_LEN + 1];
+  uint8_t app_data_len = beaconBuildAppData(app_data, readBattMilliVolts(), getName(default_name));
 
   mesh::Packet* pkt = createAdvert(self_id, app_data, app_data_len);   // stamps + signs the counter
   if (pkt == NULL) { _last_error = "no packet"; return false; }
@@ -120,6 +121,10 @@ bool Beacon::setIntervalSecs(uint32_t secs) {
 }
 
 bool Beacon::setName(const char* name) {
+  if (name[0] == 0 || strcmp(name, "auto") == 0) {   // "auto" is reserved, it cannot be used as an explicit name
+    memset(_prefs.name, 0, sizeof(_prefs.name));
+    return savePrefs();
+  }
   if (!AdvertDataParser::isValidName(name)) return false;
   size_t n = mesh::validUtf8PrefixLength(name, BEACON_MAX_NAME_LEN);
   if (name[n] != 0) return false;   // too long or not valid UTF-8

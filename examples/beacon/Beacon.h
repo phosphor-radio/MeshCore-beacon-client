@@ -11,8 +11,10 @@
 #include <helpers/BeaconAdvert.h>
 #include <target.h>
 
+// Empty means automatic: the advert carries beaconDefaultName() derived from the beacon's own key.  A build can set this
+// flag to force an explicit default name instead.
 #ifndef BEACON_NAME
-  #define BEACON_NAME  "beacon"
+  #define BEACON_NAME  ""
 #endif
 #ifndef BEACON_INTERVAL_SECS
   #define BEACON_INTERVAL_SECS  300       // 5 minutes
@@ -66,7 +68,7 @@ struct BeaconPrefs {
   uint8_t sf;
   uint8_t cr;
   int8_t tx_power_dbm;
-  char name[BEACON_MAX_NAME_LEN + 1];
+  char name[BEACON_MAX_NAME_LEN + 1];   // explicit name; empty means automatic
 };
 
 class Beacon : public mesh::Mesh {
@@ -100,7 +102,14 @@ public:
 
   uint32_t getCounter() const { return _clock.getCurrentTime(); }
   uint32_t getIntervalSecs() const { return _prefs.interval_secs; }
-  const char* getName() const { return _prefs.name; }
+  /** \returns  true if no explicit name is set, so the advert carries the name derived from the key */
+  bool isNameAuto() const { return _prefs.name[0] == 0; }
+  /** \returns  the name the advert carries: the explicit one, or the key-derived default written into 'buf' */
+  const char* getName(char buf[BEACON_DEFAULT_NAME_LEN + 1]) const {
+    if (_prefs.name[0]) return _prefs.name;
+    beaconDefaultName(buf, self_id.pub_key);
+    return buf;
+  }
 
   float getFreq() const { return _prefs.freq; }
   float getBandwidth() const { return _prefs.bw; }
@@ -116,5 +125,6 @@ public:
   bool setTxPower(int8_t dbm);
 
   bool setIntervalSecs(uint32_t secs);
+  /** \param name  an explicit name, or "auto" (or empty) to go back to the name derived from the key */
   bool setName(const char* name);
 };
