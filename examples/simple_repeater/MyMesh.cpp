@@ -1569,9 +1569,10 @@ bool MyMesh::handleBeaconCommand(char* command, char* reply) {
     beacon_log = strcmp(&command[11], "on") == 0;
     strcpy(reply, beacon_log ? "OK - logging beacons to serial" : "OK");
   } else if (strcmp(command, "beacon.stats") == 0) {
-    sprintf(reply, "heard %lu, reported %lu, dropped %lu, send fail %lu, pending %d, names sent %lu",
+    sprintf(reply, "heard %lu, reported %lu, dropped %lu, send fail %lu, pending %d, names sent %lu, up %lus",
             (unsigned long)beacon_heard, (unsigned long)beacon_reported, (unsigned long)beacon_dropped,
-            (unsigned long)beacon_send_fail, beacon_batch.count(), (unsigned long)beacon_names_sent);
+            (unsigned long)beacon_send_fail, beacon_batch.count(), (unsigned long)beacon_names_sent,
+            (unsigned long)(uptime_millis / 1000));   // longest reply is 129 characters, the remote limit is 157
   } else {
     return false;
   }

@@ -1269,7 +1269,9 @@ announcement queued (`NAME <id> "..." (first|changed|refresh)`). Not saved; off 
 #### View beacon counters
 **Usage:** `beacon.stats`
 
-**Output:** beacons heard, observations reported, dropped, send failures, pending in the current batch, and names sent.
+**Output:** beacons heard, observations reported, dropped, send failures, pending in the current batch, names sent, and
+uptime in seconds, for example `heard 12, reported 12, dropped 0, send fail 0, pending 2, names sent 3, up 86400s`. The
+counters and the uptime restart from zero at every boot.
 
 ---
 
