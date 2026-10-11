@@ -499,6 +499,28 @@ out path length `0xFF` for a repeater whose route is not known. A length of 0 me
 command the repeater answers with a path return, and the companion stores that path (`BaseChatMesh::onContactPathRecv`),
 so later messages go direct until the path is reset or replaced.
 
+### Adverts and stored contacts
+
+When the companion hears a node advertise, what the host receives depends on whether the node is a stored contact (source:
+`BaseChatMesh::onAdvertRecv`, `MyMesh::onDiscoveredContact`):
+
+| Case | What the host gets |
+|---|---|
+| Stored contact, advert newer than the stored one | `PUSH_CODE_ADVERT` (0x80): `0x80` + the 32-byte public key. Nothing else; read the contact (`CMD_GET_CONTACT_BY_KEY`, 30) for its data. |
+| Stored contact, advert **not newer** than the stored one | **Nothing.** The advert is dropped silently as a possible replay. |
+| Not a stored contact (manual-add mode, hop limit, or a full table) | `PUSH_CODE_NEW_ADVERT` (0x8A): a full contact frame built from the advert. |
+
+For a stored contact the name, type and last-advert time are always updated, but **the position only changes if the advert carries
+one.** An advert without a position leaves the old coordinates in place, and reading the contact then returns that retained value.
+Host software therefore cannot tell "the node advertised this position" from "the companion kept it from earlier". A repeater whose
+adverts lack a position keeps showing its last known one, however often it is updated. The same applies to a node whose clock has
+gone backwards: its adverts are dropped, and the stored position goes stale.
+
+To see what a node actually transmitted, use the raw radio log, which the companion pushes for every packet it receives
+(`PUSH_CODE_LOG_RX_DATA`, 0x88): `0x88`, SNR x4 (int8), RSSI (int8), then the packet as received. An advert is payload type 4: after
+the header, optional transport codes, and the path come the 32-byte key, a 4-byte timestamp, a 64-byte signature and the advert data,
+whose first byte holds the node type in its low 4 bits and a flag `0x10` when a latitude and longitude (int32 x 1e6 each) follow.
+
 ### Log in
 
 **Command** (`CMD_SEND_LOGIN`, 26):
