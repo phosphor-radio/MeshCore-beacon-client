@@ -1201,7 +1201,8 @@ Ethernet support is available on RAK4631 boards with a RAK13800 (W5100S) Etherne
 ### Beacon reporter (when built with WITH_BEACON_REPORTER)
 
 Repeaters built with `-D WITH_BEACON_REPORTER=1` (the `*_beacon_repeater` environments) report the beacons they hear to a
-private channel. Two message types are sent on it: observation reports (`0xFFBE`) and name announcements (`0xFFBF`). Nothing
+private channel. They always put their configured position (`set lat` / `set lon`) in their adverts: a saved "no position"
+advert setting is overridden at every boot, because the base station takes each repeater's position from its adverts. Two message types are sent on it: observation reports (`0xFFBE`) and name announcements (`0xFFBF`). Nothing
 is sent until a channel is set.
 
 ---

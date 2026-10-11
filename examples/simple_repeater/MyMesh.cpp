@@ -973,6 +973,12 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
+#ifdef WITH_BEACON_REPORTER
+  // The base station learns each repeater's position from its adverts. A saved "no position in adverts" (from older firmware or an
+  // old setting) would leave the base with whatever position it saw last, and these builds have no command to change it. Only
+  // 'none' is overridden, in memory and at every boot; a GPS build's 'share' is left alone.
+  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
+#endif
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
